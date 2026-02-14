@@ -1,0 +1,233 @@
+You are Claude Code acting as a senior staff engineer, platform architect, and security engineer.
+
+Build a functional-but-credible MVP web platform called “Zumo” following the SAME high-fidelity POC philosophy:
+- Everything should LOOK and FEEL real for investors and early users
+- For MVP we SIMULATE most external integrations and infrastructure (no real OpenClaw, no real VPN, no real servers, no real Slack/GitHub/Sentry)
+- Policy enforcement + approvals + audit logging must be REAL
+
+Zumo is a “complexity-killer layer” for deploying AI employees:
+Users can choose and buy their own underlying components (LLM provider, virtual server, VPN/overlay network, etc.), and Zumo removes the complexity by guiding setup, generating configs, and providing a single UI to manage it all.
+
+Important: In this business model, payments mostly go to the underlying vendors (LLM provider / server provider / VPN provider). Zumo is the orchestration + UX + safety layer. For MVP, simulate purchasing/checkout and vendor provisioning flows, but design the data model + UI as if real.
+
+Zumo lets companies deploy and manage AI employees for their teams — built on OpenClaw by default (simulated) — but flexible for future runtimes and model providers.
+
+Zumo must allow creating an AI employee in under 5 minutes from a simple UI, connecting tools via OAuth-like flows (simulated), running 24/7 (simulated heartbeats/monitors), collaborating with other AI employees, and operating like a real teammate with a dedicated identity.
+
+Zumo must support ALL major model providers:
+- OpenAI
+- Anthropic
+- Google (Gemini)
+- local/self-hosted OpenAI-compatible endpoints
+- extensible provider adapter system
+
+Zumo must be secure and reliable by default (inspired by a “secure setup guide”):
+- private-by-default network posture (no public agent gateway)
+- least privilege + scoped credentials
+- non-root execution (simulated but represented)
+- prompt injection defenses (real in policy layer)
+- spending limits (real in platform logic)
+- audit everything + approvals for risky actions (real)
+- supervisor/heartbeats/retries (simulated but consistent)
+
+EU posture (MVP-level): tenant isolation + retention/export/delete controls exist and work.
+
+--------------------------------------------
+TOP-LEVEL PRODUCT FLOW (ONBOARDING = MARKETPLACE + WIRING LAYER)
+--------------------------------------------
+
+A) Auth:
+- Users can sign up / log in with email + password.
+- On first login, user completes onboarding wizard.
+- Onboarding is framed as “Choose your stack” (LLM + Server + VPN + Connectors) and Zumo wires it together safely.
+
+B) Onboarding wizard (MUST exist BEFORE Create Employee)
+
+Step 1: Choose LLM Provider (BYO or Buy-through-Zumo)
+- Providers: OpenAI / Anthropic / Gemini / OpenAI-compatible
+- Two choices per provider:
+  (1) BYO: user enters API key (store encrypted). For MVP store placeholder but treat as secret.
+  (2) Buy-through-Zumo (marketplace): user selects a plan, goes through a simulated checkout, and Zumo “provisions” credentials automatically.
+- IMPORTANT BUSINESS MODEL UI:
+  - Display that billing is to the vendor/provider (simulated), with Zumo acting as setup layer.
+  - Show transparent cost estimate and Zumo’s value (“we configure securely + manage integration”).
+- Set budgets:
+  - org daily spend cap
+  - per-employee defaults
+  - hard stop and alert behavior
+
+Step 2: Choose Virtual Server Provider (BYO or Buy-through-Zumo)
+- User chooses where sandboxes run (simulated in MVP):
+  - “Bring your own server” (advanced): pick provider, enter server details/SSH key (simulated)
+  - “Buy a server via Zumo Marketplace” (recommended): choose vendor + region + size (simulated checkout)
+- Providers (simulate): Hetzner / OVH / AWS / GCP / “Custom”
+- Must show server selection cards with:
+  - region (EU default)
+  - cost estimate (vendor billed)
+  - security posture default (“locked down”)
+- After selection, show provisioning steps (simulated):
+  - allocate VM
+  - apply firewall rules
+  - create non-root runtime user
+  - install sandbox runner
+  - start supervisor + heartbeat
+- End state: “Server Ready”
+
+Step 3: Choose VPN / Private Network Provider (BYO or Buy-through-Zumo)
+- Purpose: private-by-default access to sandboxes; no public agent gateway
+- Options:
+  - Tailscale-like overlay (recommended)
+  - WireGuard (advanced)
+  - “None (not recommended)” with big warnings
+- For MVP, simulate the setup but show:
+  - generated config
+  - node enrollment
+  - private IP assignment
+  - “private access enabled” badge
+- Explain risks if user selects “None”
+
+Step 4: Connectors (Risk-Aware Access Grant)
+- User enables connectors (simulated OAuth):
+  Slack, Gmail, HubSpot, GitHub, Google Calendar (stretch Sentry/Linear)
+- Each connector card shows:
+  - risk level badge (low/med/high)
+  - data accessed + actions possible
+  - WARNING text: “Start read-only. Writes require policies + approvals.”
+  - “danger checklist” modal (token leakage, overbroad scopes, destructive actions)
+- Simulated OAuth flow:
+  click -> consent screen -> success -> create ConnectedAccount record
+- Default to READ-ONLY scopes; require “I understand risks” checkbox for write scopes
+
+After onboarding completes, user lands on main app.
+
+--------------------------------------------
+MAIN APP PAGES (KEEP FROM PREVIOUS POC)
+--------------------------------------------
+
+1) “Create Employee” wizard (under 5 minutes):
+- Employee name
+- Role template (Customer Support Agent, Developer Agent, HR Sourcer, SDR, AP Clerk, Ops Assistant) OR Custom
+
+- Choose agent runtime layer:
+  OpenClaw (DEFAULT), AutoGPT loop, Custom planner, External runtime endpoint
+
+- Choose model provider + model:
+  choose from providers configured in onboarding
+  show budgets and expected cost
+
+- Choose sandbox target:
+  choose from servers configured in onboarding
+  show “private network enabled” status
+
+- Choose tool access for this employee:
+  show only connectors enabled in onboarding
+  allow per-employee dedicated identity (simulated)
+  show risk warnings again
+
+- Set autonomy mode: Observe / Assist / Autopilot
+
+- Add instructions
+
+- Team permissions (optional)
+
+- Review screen:
+  security + compliance summary, runtime layer, permissions, budgets, private network posture
+- Create -> employee provisioned and ready (show simulated “deploy to server” steps)
+
+2) Employee dashboard:
+- status + heartbeat
+- last actions + queued tasks
+- Run Test Task
+- Activity/Audit Log (REAL hash-chained)
+- Inbox tab (agent tasks/messages)
+- Runtime tab: show/change runtime (Admin only; audit logged)
+- “Infrastructure” tab:
+  - which server this employee runs on
+  - private network status
+  - “vendor billed” cost estimate (simulated)
+
+3) Policies page (REAL LOGIC):
+- least privilege grants per employee (connector.action + constraints)
+- rate limits + max objects
+- approvals required
+- block destructive actions by default
+- inter-employee policy (task assignment rules)
+
+4) Approvals inbox (REAL):
+- pending approvals, diff preview, approve/deny
+
+5) Teams / Orchestration page:
+- workflows with triggers:
+  Slack complaint OR HubSpot ticket OR manual trigger
+- routing: Support -> Dev -> Support reply
+- visual timeline of workflow runs
+
+--------------------------------------------
+SIMULATION ENGINE (MVP REALISM)
+--------------------------------------------
+- Deterministic simulation engine that generates:
+  - Slack complaints
+  - CRM tickets
+  - GitHub issue/PR events
+  - employee heartbeats
+  - server provisioning logs
+  - VPN enrollment logs
+  - “cost meter” spending events
+- Provide “Inject Event” buttons for demo use.
+
+--------------------------------------------
+SECURITY & RELIABILITY (REAL WHERE IT COUNTS)
+--------------------------------------------
+A) Policy Gateway (REAL)
+- all tool calls go through Policy Gateway
+- autonomy enforced
+- approvals enforced
+- prompt injection defense:
+  external content never changes policy/scopes
+  strict tool schemas
+
+B) Secrets handling (MVP)
+- store provider keys and connector tokens encrypted-at-rest (node crypto OK)
+- even if placeholders, treat as secrets
+
+C) Private-by-default posture (represented + enforced in config)
+- UI should show “No public gateway” posture and require VPN module to be “secure”
+- If VPN = none, show red risk warnings and restrict autonomy to Observe by default
+
+D) Audit logs (REAL)
+- hash-chained tamper-evident audit log for all actions
+
+E) Spending limits (REAL)
+- enforce budgets in logic; show hard-stop behavior
+
+--------------------------------------------
+EU PRIVACY (MVP)
+--------------------------------------------
+- org tenant isolation enforced everywhere (tests)
+- data controls page: retention, export JSON, delete employee (soft delete)
+- DATA_REGION=EU flag
+
+--------------------------------------------
+RUNTIME + PROVIDER ADAPTER SYSTEMS (REAL STRUCTURE, SIMULATED EXECUTION)
+--------------------------------------------
+Runtime plugins:
+ openclaw | autogpt_loop | custom_planner | external_endpoint
+Provider adapters:
+ openai | anthropic | gemini | openai_compatible
+Simulate behaviors; show realistic logs and cost estimates.
+
+--------------------------------------------
+DELIVERABLES
+--------------------------------------------
+- Next.js + TS + Tailwind + Prisma SQLite
+- auth + onboarding wizard (choose LLM + server + VPN + connectors)
+- main pages (employees/dashboard/policies/approvals/teams)
+- seed demo org with onboarding completed + two employees (Support + Dev)
+- canonical multi-agent workflow demo runs end-to-end
+- tests 30+ (policy/approvals/audit chain/org isolation)
+
+Start now:
+1) output architecture plan (file tree + modules)
+2) implement step-by-step
+3) run tests and fix until green
+4) deliver working MVP demo
