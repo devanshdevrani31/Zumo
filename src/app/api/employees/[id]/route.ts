@@ -3,6 +3,7 @@ import prisma from '@/lib/db'
 import { withAuth } from '@/lib/api-auth'
 import { auditLogger } from '@/lib/audit'
 import { generateEvents } from '@/lib/simulation'
+import { getContainerStatus, getContainerLogs, stopContainer, startContainer, removeContainer, sendTaskToAgent } from '@/lib/docker'
 
 export async function GET(
   request: Request,
@@ -29,12 +30,32 @@ export async function GET(
       take: 20,
     })
 
-    const activity = generateEvents(id, 5)
+    // Get real container status if available
+    let containerInfo = null
+    let containerLogs: string[] = []
+    if (employee.containerId) {
+      try {
+        containerInfo = await getContainerStatus(employee.containerId)
+        containerLogs = await getContainerLogs(employee.containerId, 50)
+      } catch { /* container may not exist */ }
+    }
+
+    // Fall back to simulation if no real container
+    const activity = containerInfo?.running
+      ? containerLogs.slice(-5).map((log, i) => ({
+          id: `log-${i}`,
+          type: 'container_log',
+          message: log,
+          timestamp: new Date().toISOString(),
+        }))
+      : generateEvents(id, 5)
 
     return NextResponse.json({
       ...employee,
       auditLogs,
       activity,
+      containerInfo,
+      containerLogs: containerLogs.slice(-20),
     })
   })
 }
@@ -67,7 +88,38 @@ export async function PUT(
         status,
         teamId,
         action,
+        taskDescription,
       } = body
+
+      // Handle container actions
+      if (action === 'run_task' && employee.containerId && taskDescription) {
+        try {
+          const taskId = `task-${Date.now()}`
+          const result = await sendTaskToAgent(employee.containerId, {
+            id: taskId,
+            description: taskDescription,
+          })
+          await auditLogger.log('employee.task_executed', JSON.stringify({ taskId, description: taskDescription }), id, auth.orgId)
+          return NextResponse.json({ taskResult: result })
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'Task failed'
+          return NextResponse.json({ taskResult: { status: 'failed', output: msg } })
+        }
+      }
+
+      if (action === 'stop_container' && employee.containerId) {
+        await stopContainer(employee.containerId)
+        await prisma.employee.update({ where: { id }, data: { status: 'paused' } })
+        await auditLogger.log('employee.container_stopped', '', id, auth.orgId)
+        return NextResponse.json({ status: 'stopped' })
+      }
+
+      if (action === 'start_container' && employee.containerId) {
+        await startContainer(employee.containerId)
+        await prisma.employee.update({ where: { id }, data: { status: 'running' } })
+        await auditLogger.log('employee.container_started', '', id, auth.orgId)
+        return NextResponse.json({ status: 'running' })
+      }
 
       const updateData: Record<string, unknown> = {}
 
@@ -126,12 +178,18 @@ export async function DELETE(
         )
       }
 
+      // Stop and remove Docker container if exists
+      if (employee.containerId) {
+        try { await removeContainer(employee.containerId) } catch { /* ignore */ }
+      }
+
       const updated = await prisma.employee.update({
         where: { id },
         data: {
           softDeleted: true,
           deletedAt: new Date(),
           status: 'stopped',
+          containerId: null,
         },
       })
 

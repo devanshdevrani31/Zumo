@@ -118,13 +118,21 @@ export default function OnboardingPage() {
   const [llmMode, setLlmMode] = useState<'byo' | 'marketplace'>('byo')
   const [llmProvider, setLlmProvider] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [apiKeyValidated, setApiKeyValidated] = useState(false)
+  const [apiKeyValidating, setApiKeyValidating] = useState(false)
+  const [apiKeyError, setApiKeyError] = useState('')
+  const [apiKeyModels, setApiKeyModels] = useState<string[]>([])
+  const [showApiKeyHelp, setShowApiKeyHelp] = useState(false)
+  const [localEndpoint, setLocalEndpoint] = useState('http://localhost:11434/v1')
   const [marketplacePlan, setMarketplacePlan] = useState('')
   const [dailySpendCap, setDailySpendCap] = useState(100)
   const [perEmployeeCap, setPerEmployeeCap] = useState(25)
   const [hardStopBehavior, setHardStopBehavior] = useState('pause')
 
-  // Step 2: Server
-  const [serverMode, setServerMode] = useState<'byo' | 'marketplace'>('marketplace')
+  // Step 2: Docker / Server
+  const [serverMode, setServerMode] = useState<'docker' | 'marketplace'>('docker')
+  const [dockerStatus, setDockerStatus] = useState<{ available: boolean; version?: string; error?: string } | null>(null)
+  const [dockerChecking, setDockerChecking] = useState(false)
   const [serverProvider, setServerProvider] = useState('hetzner')
   const [serverPlan, setServerPlan] = useState('cx41')
   const [serverRegion, setServerRegion] = useState('eu-central-1')
@@ -169,6 +177,93 @@ export default function OnboardingPage() {
     }
     fetchOnboarding()
   }, [])
+
+  // Real API key validation
+  const handleValidateApiKey = async () => {
+    if (!apiKey || !llmProvider) return
+    setApiKeyValidating(true)
+    setApiKeyError('')
+    setApiKeyValidated(false)
+    setApiKeyModels([])
+    try {
+      const res = await fetch('/api/validate-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: llmProvider,
+          key: apiKey,
+          endpoint: llmProvider === 'local' ? localEndpoint : undefined,
+        }),
+      })
+      const data = await res.json()
+      if (data.valid) {
+        setApiKeyValidated(true)
+        setApiKeyModels(data.models || [])
+      } else {
+        setApiKeyError(data.error || 'Invalid API key')
+      }
+    } catch {
+      setApiKeyError('Could not reach validation service. Check your connection.')
+    } finally {
+      setApiKeyValidating(false)
+    }
+  }
+
+  // Docker availability check
+  const handleCheckDocker = async () => {
+    setDockerChecking(true)
+    try {
+      const res = await fetch('/api/docker')
+      const data = await res.json()
+      setDockerStatus(data.docker)
+    } catch {
+      setDockerStatus({ available: false, error: 'Could not check Docker status' })
+    } finally {
+      setDockerChecking(false)
+    }
+  }
+
+  const API_KEY_HELP: Record<string, { url: string; steps: string[] }> = {
+    openai: {
+      url: 'https://platform.openai.com/api-keys',
+      steps: [
+        'Go to platform.openai.com and sign in',
+        'Click your profile icon → "API keys"',
+        'Click "Create new secret key"',
+        'Copy the key (starts with sk-)',
+        'Paste it here',
+      ],
+    },
+    anthropic: {
+      url: 'https://console.anthropic.com/settings/keys',
+      steps: [
+        'Go to console.anthropic.com and sign in',
+        'Click "Settings" → "API keys"',
+        'Click "Create Key"',
+        'Copy the key (starts with sk-ant-)',
+        'Paste it here',
+      ],
+    },
+    gemini: {
+      url: 'https://aistudio.google.com/apikey',
+      steps: [
+        'Go to aistudio.google.com/apikey',
+        'Sign in with your Google account',
+        'Click "Create API Key"',
+        'Copy the key',
+        'Paste it here',
+      ],
+    },
+    local: {
+      url: '',
+      steps: [
+        'Install Ollama (ollama.com) or another OpenAI-compatible server',
+        'Start the server (e.g., "ollama serve")',
+        'The default endpoint is http://localhost:11434/v1',
+        'No API key needed for local — leave it blank or enter any value',
+      ],
+    },
+  }
 
   const riskBadgeColor = (level: string) => {
     switch (level.toLowerCase()) {
@@ -231,26 +326,56 @@ export default function OnboardingPage() {
     setConnectingModal(null)
   }
 
-  const handleFinishOnboarding = async () => {
+  const saveStep = useCallback(async (stepNum: number, data: Record<string, unknown>) => {
     try {
       await fetch('/api/onboarding', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          step: 4,
-          llmProvider,
-          llmMode,
-          serverProvider,
-          serverPlan,
-          serverRegion,
-          vpnProvider,
-          orgDailySpendCap: dailySpendCap,
-          perEmployeeSpendCap: perEmployeeCap,
-          hardStopBehavior,
-          connectedAccounts: Object.entries(connectedAccounts)
-            .filter(([, v]) => v.connected)
-            .map(([k, v]) => ({ connector: k, ...v })),
-        }),
+        body: JSON.stringify({ step: stepNum, data }),
+      })
+    } catch { /* silent */ }
+  }, [])
+
+  const handleNext = async () => {
+    // Save current step data when advancing
+    if (step === 1 && llmProvider) {
+      await saveStep(1, {
+        provider: llmProvider.startsWith('marketplace-') ? llmProvider.replace('marketplace-', '') : llmProvider,
+        mode: llmMode === 'marketplace' ? 'marketplace' : 'api_key',
+        credentials: apiKey || undefined,
+        plan: marketplacePlan || undefined,
+        endpoint: llmProvider === 'local' ? localEndpoint : undefined,
+        dailySpendCap,
+        perEmployeeSpendCap: perEmployeeCap,
+      })
+    }
+    if (step === 2) {
+      await saveStep(2, {
+        provider: serverMode === 'docker' ? 'docker' : serverProvider,
+        mode: serverMode,
+        region: serverRegion,
+        costEstimate: 0,
+      })
+    }
+    if (step === 3) {
+      await saveStep(3, { provider: vpnProvider, mode: vpnProvider === 'none' ? 'none' : 'overlay' })
+    }
+    setStep(s => s + 1)
+  }
+
+  const handleFinishOnboarding = async () => {
+    try {
+      // Save connectors as step 4
+      await saveStep(4, {
+        accounts: Object.entries(connectedAccounts)
+          .filter(([, v]) => v.connected)
+          .map(([k, v]) => ({
+            connector: k,
+            scopes: v.scopes,
+            writeEnabled: v.writeEnabled,
+            riskLevel: CONNECTORS.find(c => c.id === k)?.riskLevel || 'low',
+            status: 'connected',
+          })),
       })
       router.push('/')
     } catch {
@@ -360,11 +485,82 @@ export default function OnboardingPage() {
                   ))}
                 </div>
                 {llmProvider && (
-                  <div>
-                    <label className="block text-sm font-medium text-slate-300 mb-2">API Key</label>
-                    <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)}
-                      placeholder="sk-... (stored encrypted)"
-                      className="w-full px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="block text-sm font-medium text-slate-300">API Key</label>
+                      <button onClick={() => setShowApiKeyHelp(!showApiKeyHelp)}
+                        className="text-xs text-blue-400 hover:text-blue-300 underline">
+                        {showApiKeyHelp ? 'Hide help' : "What's an API key?"}
+                      </button>
+                    </div>
+
+                    {showApiKeyHelp && API_KEY_HELP[llmProvider] && (
+                      <div className="bg-blue-900/20 border border-blue-700/40 rounded-lg p-4 text-sm">
+                        <p className="text-blue-300 font-medium mb-2">How to get your {LLM_PROVIDERS.find(p => p.id === llmProvider)?.name} API key:</p>
+                        <ol className="list-decimal list-inside space-y-1 text-slate-300">
+                          {API_KEY_HELP[llmProvider].steps.map((s, i) => (
+                            <li key={i}>{s}</li>
+                          ))}
+                        </ol>
+                        {API_KEY_HELP[llmProvider].url && (
+                          <a href={API_KEY_HELP[llmProvider].url} target="_blank" rel="noopener noreferrer"
+                            className="inline-block mt-2 text-blue-400 hover:text-blue-300 underline">
+                            Open {LLM_PROVIDERS.find(p => p.id === llmProvider)?.name} dashboard
+                          </a>
+                        )}
+                      </div>
+                    )}
+
+                    {llmProvider === 'local' && (
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Server Endpoint</label>
+                        <input type="text" value={localEndpoint} onChange={e => setLocalEndpoint(e.target.value)}
+                          placeholder="http://localhost:11434/v1"
+                          className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      </div>
+                    )}
+
+                    <div className="flex gap-2">
+                      <input type="password" value={apiKey} onChange={e => { setApiKey(e.target.value); setApiKeyValidated(false); setApiKeyError('') }}
+                        placeholder={llmProvider === 'local' ? 'API key (optional for local)' : 'sk-... (stored encrypted)'}
+                        className="flex-1 px-4 py-3 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      <button onClick={handleValidateApiKey} disabled={apiKeyValidating || (!apiKey && llmProvider !== 'local')}
+                        className={`px-4 py-3 rounded-lg font-medium text-sm transition-colors whitespace-nowrap ${
+                          apiKeyValidated
+                            ? 'bg-green-600 text-white'
+                            : 'bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40'
+                        }`}>
+                        {apiKeyValidating ? (
+                          <span className="flex items-center gap-2">
+                            <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            Testing...
+                          </span>
+                        ) : apiKeyValidated ? (
+                          <span className="flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                            Valid
+                          </span>
+                        ) : 'Test Connection'}
+                      </button>
+                    </div>
+
+                    {apiKeyError && (
+                      <div className="flex items-start gap-2 p-3 bg-red-900/20 border border-red-700/40 rounded-lg">
+                        <svg className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                        <span className="text-sm text-red-300">{apiKeyError}</span>
+                      </div>
+                    )}
+
+                    {apiKeyValidated && apiKeyModels.length > 0 && (
+                      <div className="p-3 bg-green-900/20 border border-green-700/40 rounded-lg">
+                        <p className="text-sm text-green-300 font-medium mb-1">Connection successful!</p>
+                        <p className="text-xs text-slate-400">Available models: {apiKeyModels.slice(0, 5).join(', ')}{apiKeyModels.length > 5 ? ` +${apiKeyModels.length - 5} more` : ''}</p>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -425,149 +621,220 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* Step 2: Server Provider */}
+        {/* Step 2: Agent Environment */}
         {step === 2 && (
           <div>
-            <h2 className="text-xl font-semibold mb-2 text-white">Server Provider</h2>
-            <p className="text-slate-400 text-sm mb-6">Where should your AI employees run?</p>
+            <h2 className="text-xl font-semibold mb-2 text-white">Agent Environment</h2>
+            <p className="text-slate-400 text-sm mb-6">Where should your AI employees run? Each agent runs in a secure, isolated container.</p>
 
             {/* Mode Tabs */}
             <div className="flex gap-1 mb-6 bg-slate-700/50 rounded-lg p-1">
+              <button onClick={() => setServerMode('docker')}
+                className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                  serverMode === 'docker' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}>
+                This Machine (Recommended)
+              </button>
               <button onClick={() => setServerMode('marketplace')}
                 className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
                   serverMode === 'marketplace' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-white'
                 }`}>
-                Marketplace
-              </button>
-              <button onClick={() => setServerMode('byo')}
-                className={`flex-1 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-                  serverMode === 'byo' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-white'
-                }`}>
-                Bring Your Own
+                Cloud Server
               </button>
             </div>
 
-            {/* Provider Selection */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
-              {SERVER_PROVIDERS.map(sp => (
-                <button key={sp.id} onClick={() => setServerProvider(sp.id)}
-                  className={`p-4 rounded-lg border text-left transition-all relative ${
-                    serverProvider === sp.id ? 'border-blue-500 bg-blue-900/20' : 'border-slate-600 bg-slate-700/50 hover:border-slate-500'
-                  }`}>
-                  {sp.recommended && (
-                    <span className="absolute top-2 right-2 px-1.5 py-0.5 bg-green-600/20 text-green-400 text-[9px] font-semibold uppercase rounded border border-green-500/30">
-                      Recommended
-                    </span>
-                  )}
-                  <h3 className="font-semibold text-white mb-1">{sp.name}</h3>
-                  <p className="text-xs text-slate-400">{sp.description}</p>
-                </button>
-              ))}
-            </div>
+            {serverMode === 'docker' && (
+              <div className="space-y-4">
+                <div className="bg-slate-700/30 border border-slate-700 rounded-lg p-5">
+                  <div className="flex items-start gap-4">
+                    <div className="w-12 h-12 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center flex-shrink-0">
+                      <svg className="w-6 h-6 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+                      </svg>
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="text-white font-semibold mb-1">Docker Containers</h3>
+                      <p className="text-sm text-slate-400 mb-3">
+                        Each AI employee runs in its own isolated Docker container on this machine.
+                        Containers are locked down with no root access, limited memory, and network isolation.
+                      </p>
+                      <div className="grid grid-cols-2 gap-2 text-xs mb-4">
+                        <div className="flex items-center gap-1.5 text-slate-300">
+                          <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                          Non-root execution
+                        </div>
+                        <div className="flex items-center gap-1.5 text-slate-300">
+                          <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                          Memory limits enforced
+                        </div>
+                        <div className="flex items-center gap-1.5 text-slate-300">
+                          <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                          Network isolation
+                        </div>
+                        <div className="flex items-center gap-1.5 text-slate-300">
+                          <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+                          Capabilities dropped
+                        </div>
+                      </div>
 
-            {serverMode === 'marketplace' && serverProvider !== 'custom' && (
-              <>
-                {/* Plan Selection */}
-                <div className="mb-4">
-                  <h3 className="text-sm font-medium text-slate-300 mb-3">Server Plan</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {SERVER_PLANS.map(plan => (
-                      <button key={plan.id} onClick={() => setServerPlan(plan.id)}
-                        className={`p-3 rounded-lg border text-left transition-all ${
-                          serverPlan === plan.id ? 'border-blue-500 bg-blue-900/20' : 'border-slate-600 bg-slate-700/50 hover:border-slate-500'
-                        }`}>
-                        <h4 className="font-semibold text-white text-sm">{plan.name}</h4>
-                        <p className="text-xs text-slate-400 mt-1">{plan.specs}</p>
-                        <p className="text-xs text-blue-400 mt-1">{plan.cost}</p>
+                      <button onClick={handleCheckDocker} disabled={dockerChecking}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium text-white transition-colors disabled:opacity-60">
+                        {dockerChecking ? (
+                          <span className="flex items-center gap-2">
+                            <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            Checking...
+                          </span>
+                        ) : dockerStatus?.available ? 'Re-check Docker' : 'Check Docker'}
                       </button>
-                    ))}
+                    </div>
                   </div>
                 </div>
 
-                {/* Region Selector */}
-                <div className="mb-6">
-                  <label className="block text-sm font-medium text-slate-300 mb-2">Region</label>
-                  <select value={serverRegion} onChange={e => setServerRegion(e.target.value)}
-                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
-                    {REGIONS.map(r => (
-                      <option key={r.id} value={r.id}>{r.name}{r.default ? ' (default)' : ''}</option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* Provisioning */}
-                {!provisioningComplete && (
-                  <button onClick={handleProvisionServer} disabled={provisioning}
-                    className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors font-medium disabled:opacity-60 text-white mb-4">
-                    {provisioning ? 'Provisioning...' : 'Provision Server'}
-                  </button>
+                {dockerStatus && (
+                  <div className={`p-4 rounded-lg border ${dockerStatus.available
+                    ? 'bg-green-900/10 border-green-800/50'
+                    : 'bg-red-900/10 border-red-800/50'
+                  }`}>
+                    {dockerStatus.available ? (
+                      <div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <svg className="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          <span className="text-green-400 font-medium">Docker is running</span>
+                        </div>
+                        <p className="text-xs text-slate-400">Version: {dockerStatus.version}</p>
+                        <p className="text-xs text-slate-400 mt-1">Your AI agents will run in secure containers on this machine.</p>
+                      </div>
+                    ) : (
+                      <div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <svg className="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                          <span className="text-red-400 font-medium">Docker not found</span>
+                        </div>
+                        <p className="text-sm text-slate-300 mb-2">Docker is required to run AI agents securely. Here is how to install it:</p>
+                        <ol className="list-decimal list-inside space-y-1 text-sm text-slate-400">
+                          <li>Download Docker Desktop from <a href="https://docker.com/products/docker-desktop" target="_blank" rel="noopener noreferrer" className="text-blue-400 underline">docker.com</a></li>
+                          <li>Install and start Docker Desktop</li>
+                          <li>Come back here and click &quot;Check Docker&quot; again</li>
+                        </ol>
+                      </div>
+                    )}
+                  </div>
                 )}
 
-                {/* Provisioning Animation */}
-                {(provisioning || provisioningComplete) && (
-                  <div className="bg-slate-700/30 border border-slate-700 rounded-lg p-4 mb-4">
-                    <div className="space-y-2">
-                      {PROVISIONING_STEPS.map((ps, idx) => {
-                        const isActive = provisioning && idx === provisioningStep
-                        const isComplete = idx < provisioningStep || provisioningComplete
-                        const isVisible = idx <= provisioningStep || provisioningComplete
-                        if (!isVisible) return null
-                        return (
-                          <div key={idx} className="flex items-center gap-3">
-                            <div className="w-5 h-5 flex items-center justify-center flex-shrink-0">
-                              {isComplete ? (
-                                <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                                  <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
-                                </svg>
-                              ) : isActive ? (
-                                <div className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-                              ) : null}
+                {!dockerStatus && (
+                  <p className="text-xs text-slate-500">Click &quot;Check Docker&quot; to verify your setup. You can also skip this and set it up later.</p>
+                )}
+              </div>
+            )}
+
+            {serverMode === 'marketplace' && (
+              <>
+                {/* Provider Selection */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+                  {SERVER_PROVIDERS.map(sp => (
+                    <button key={sp.id} onClick={() => setServerProvider(sp.id)}
+                      className={`p-4 rounded-lg border text-left transition-all relative ${
+                        serverProvider === sp.id ? 'border-blue-500 bg-blue-900/20' : 'border-slate-600 bg-slate-700/50 hover:border-slate-500'
+                      }`}>
+                      {sp.recommended && (
+                        <span className="absolute top-2 right-2 px-1.5 py-0.5 bg-green-600/20 text-green-400 text-[9px] font-semibold uppercase rounded border border-green-500/30">
+                          Recommended
+                        </span>
+                      )}
+                      <h3 className="font-semibold text-white mb-1">{sp.name}</h3>
+                      <p className="text-xs text-slate-400">{sp.description}</p>
+                    </button>
+                  ))}
+                </div>
+
+                {serverProvider !== 'custom' && (
+                  <>
+                    <div className="mb-4">
+                      <h3 className="text-sm font-medium text-slate-300 mb-3">Server Plan</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        {SERVER_PLANS.map(plan => (
+                          <button key={plan.id} onClick={() => setServerPlan(plan.id)}
+                            className={`p-3 rounded-lg border text-left transition-all ${
+                              serverPlan === plan.id ? 'border-blue-500 bg-blue-900/20' : 'border-slate-600 bg-slate-700/50 hover:border-slate-500'
+                            }`}>
+                            <h4 className="font-semibold text-white text-sm">{plan.name}</h4>
+                            <p className="text-xs text-slate-400 mt-1">{plan.specs}</p>
+                            <p className="text-xs text-blue-400 mt-1">{plan.cost}</p>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="mb-6">
+                      <label className="block text-sm font-medium text-slate-300 mb-2">Region</label>
+                      <select value={serverRegion} onChange={e => setServerRegion(e.target.value)}
+                        className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        {REGIONS.map(r => (
+                          <option key={r.id} value={r.id}>{r.name}{r.default ? ' (default)' : ''}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {!provisioningComplete && (
+                      <button onClick={handleProvisionServer} disabled={provisioning}
+                        className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors font-medium disabled:opacity-60 text-white mb-4">
+                        {provisioning ? 'Provisioning...' : 'Provision Server'}
+                      </button>
+                    )}
+
+                    {(provisioning || provisioningComplete) && (
+                      <div className="bg-slate-700/30 border border-slate-700 rounded-lg p-4 mb-4">
+                        <div className="space-y-2">
+                          {PROVISIONING_STEPS.map((ps, idx) => {
+                            const isActive = provisioning && idx === provisioningStep
+                            const isComplete = idx < provisioningStep || provisioningComplete
+                            const isVisible = idx <= provisioningStep || provisioningComplete
+                            if (!isVisible) return null
+                            return (
+                              <div key={idx} className="flex items-center gap-3">
+                                <div className="w-5 h-5 flex items-center justify-center flex-shrink-0">
+                                  {isComplete ? (
+                                    <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                                    </svg>
+                                  ) : isActive ? (
+                                    <div className="w-3.5 h-3.5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                                  ) : null}
+                                </div>
+                                <span className={`text-sm font-mono ${isComplete ? 'text-emerald-400' : isActive ? 'text-blue-300' : 'text-slate-500'}`}>
+                                  {ps.label}
+                                </span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <div className="mt-3 h-1 bg-slate-600 rounded-full overflow-hidden">
+                          <div className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 rounded-full transition-all duration-500"
+                            style={{ width: `${provisioningComplete ? 100 : ((provisioningStep + 1) / PROVISIONING_STEPS.length) * 100}%` }} />
+                        </div>
+                      </div>
+                    )}
+
+                    {provisioningComplete && (
+                      <div className="bg-green-900/10 border border-green-800/50 rounded-lg p-4">
+                        <h3 className="text-sm font-medium text-green-400 mb-2">Security Posture</h3>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          {['Region: ' + (REGIONS.find(r => r.id === serverRegion)?.name || serverRegion), 'Firewall configured', 'Non-root user', 'gVisor sandbox active'].map((item, i) => (
+                            <div key={i} className="flex items-center gap-2">
+                              <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                              <span className="text-slate-300">{item}</span>
                             </div>
-                            <span className={`text-sm font-mono ${isComplete ? 'text-emerald-400' : isActive ? 'text-blue-300' : 'text-slate-500'}`}>
-                              {ps.label}
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </div>
-                    <div className="mt-3 h-1 bg-slate-600 rounded-full overflow-hidden">
-                      <div className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 rounded-full transition-all duration-500"
-                        style={{ width: `${provisioningComplete ? 100 : ((provisioningStep + 1) / PROVISIONING_STEPS.length) * 100}%` }} />
-                    </div>
-                  </div>
-                )}
-
-                {/* Security Posture Summary */}
-                {provisioningComplete && (
-                  <div className="bg-green-900/10 border border-green-800/50 rounded-lg p-4">
-                    <h3 className="text-sm font-medium text-green-400 mb-2">Security Posture</h3>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div className="flex items-center gap-2">
-                        <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                        <span className="text-slate-300">Region: {REGIONS.find(r => r.id === serverRegion)?.name}</span>
+                          ))}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                        <span className="text-slate-300">Firewall configured</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                        <span className="text-slate-300">Non-root user</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <svg className="w-3.5 h-3.5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                        <span className="text-slate-300">gVisor sandbox active</span>
-                      </div>
-                    </div>
-                  </div>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -742,7 +1009,7 @@ PersistentKeepalive = 25`}
               </button>
             )}
             {step < TOTAL_STEPS ? (
-              <button onClick={() => setStep(s => s + 1)} disabled={!canProceed()}
+              <button onClick={handleNext} disabled={!canProceed()}
                 className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors font-medium disabled:opacity-40 disabled:cursor-not-allowed text-white">
                 Next
               </button>

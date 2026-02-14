@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { withAuth } from '@/lib/api-auth'
 import { encrypt } from '@/lib/secrets'
+import { validateApiKey } from '@/lib/llm-providers'
 
 export async function GET(request: Request) {
   return withAuth(request, async (_req, auth) => {
@@ -40,7 +41,18 @@ export async function PUT(request: Request) {
       switch (step) {
         case 1: {
           // LLM Provider Configuration + org budgets
-          const { provider, mode, credentials, plan, dailySpendCap, perEmployeeSpendCap } = data
+          const { provider, mode, credentials, plan, dailySpendCap, perEmployeeSpendCap, endpoint } = data
+
+          // Validate the API key against the real provider
+          if (credentials && mode === 'api_key') {
+            const validation = await validateApiKey(provider || 'openai', credentials, endpoint)
+            if (!validation.valid) {
+              return NextResponse.json(
+                { error: validation.error || 'Invalid API key', validationFailed: true },
+                { status: 400 }
+              )
+            }
+          }
 
           // Upsert LLM provider config
           const existingLlm = await prisma.providerConfig.findFirst({

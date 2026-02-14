@@ -80,6 +80,8 @@ model Employee {
   autonomyMode  String    @default("assist")
   instructions  String    @default("")
   status        String    @default("running")
+  containerId   String?
+  containerPort Int?
   teamId        String?
   orgId         String?
   serverId      String?

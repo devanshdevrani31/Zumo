@@ -14,11 +14,14 @@ interface Employee {
   autonomyMode: string
   instructions: string
   status: string
+  containerId: string | null
   teamId: string | null
   orgId: string | null
   serverId: string | null
   createdAt: string
   updatedAt: string
+  containerInfo?: { status: string; running: boolean; uptime?: number; cpuPercent?: number; memoryMb?: number } | null
+  containerLogs?: string[]
 }
 
 interface AuditLog {
@@ -185,6 +188,8 @@ export default function EmployeeDetailPage() {
       if (!res.ok) throw new Error('Employee not found')
       const data = await res.json()
       setEmployee(data)
+      if (data.auditLogs) setAuditLogs(data.auditLogs)
+      if (data.activity) setActivity(data.activity)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load employee')
     } finally {
@@ -282,36 +287,62 @@ export default function EmployeeDetailPage() {
 
   const handleTogglePause = async () => {
     if (!employee) return
-    const newStatus = employee.status === 'running' ? 'paused' : 'running'
+    const action = employee.status === 'running' ? 'stop_container' : 'start_container'
     try {
       const res = await fetch(`/api/employees/${employeeId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      if (res.ok) {
+        fetchEmployee()
+        return
+      }
+      // Fallback: just toggle status in DB
+      const newStatus = employee.status === 'running' ? 'paused' : 'running'
+      const res2 = await fetch(`/api/employees/${employeeId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus }),
       })
-      if (!res.ok) throw new Error('Failed to update status')
-      const updated = await res.json()
+      if (!res2.ok) throw new Error('Failed to update status')
+      const updated = await res2.json()
       setEmployee(updated)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update status')
     }
   }
 
+  const [testTaskInput, setTestTaskInput] = useState('')
+
   const handleTestTask = async () => {
     try {
       setTaskRunning(true)
       setTaskResult(null)
-      await new Promise(resolve => setTimeout(resolve, 2000))
-      try {
-        await fetch('/api/simulation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ employeeId, action: 'test_task', details: `Test task executed for ${employee?.name}` }),
-        })
-      } catch {
-        // Simulation endpoint may not handle POST yet
+
+      const taskDescription = testTaskInput.trim() || `Hello! Please introduce yourself and describe what you can do as a ${employee?.role}.`
+
+      // Try real container execution first
+      const res = await fetch(`/api/employees/${employeeId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'run_task', taskDescription }),
+      })
+
+      if (res.ok) {
+        const data = await res.json()
+        if (data.taskResult) {
+          setTaskResult(data.taskResult.output || data.taskResult.status || 'Task completed.')
+          setTestTaskInput('')
+          fetchActivity()
+          fetchAuditLogs()
+          return
+        }
       }
-      setTaskResult(`Task completed successfully. ${employee?.name} processed the test request and generated a response.`)
+
+      // Fallback to simulation
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      setTaskResult(`[Simulated] Task completed successfully. ${employee?.name} processed: "${taskDescription}"`)
       fetchActivity()
       fetchAuditLogs()
     } catch {
@@ -458,13 +489,32 @@ export default function EmployeeDetailPage() {
         </div>
       </div>
 
+      {/* Task Input */}
+      <div className="mb-4 p-4 bg-slate-800 rounded-xl border border-slate-700">
+        <label className="block text-sm font-medium text-slate-300 mb-2">Send a task to this agent</label>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={testTaskInput}
+            onChange={e => setTestTaskInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !taskRunning && handleTestTask()}
+            placeholder={`Ask ${employee.name} to do something...`}
+            className="flex-1 px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-purple-500"
+          />
+          <button onClick={handleTestTask} disabled={taskRunning}
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg transition-colors font-medium disabled:opacity-60 text-white whitespace-nowrap">
+            {taskRunning ? 'Running...' : 'Send'}
+          </button>
+        </div>
+      </div>
+
       {/* Task Result */}
       {taskResult && (
         <div className="mb-6 p-4 bg-slate-800 rounded-xl border border-slate-700">
           <div className="flex items-start justify-between">
-            <div>
-              <p className="text-sm font-medium text-green-400 mb-1">Task Result</p>
-              <p className="text-sm text-slate-300">{taskResult}</p>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-green-400 mb-1">Agent Response</p>
+              <p className="text-sm text-slate-300 whitespace-pre-wrap">{taskResult}</p>
             </div>
             <button onClick={() => setTaskResult(null)} className="text-slate-400 hover:text-white">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -670,25 +720,68 @@ export default function EmployeeDetailPage() {
           <div className="space-y-6">
             <h3 className="text-lg font-semibold text-white">Infrastructure</h3>
 
+            {/* Real Container Info */}
+            {employee.containerId && (
+              <div className="bg-slate-700/30 rounded-lg p-4 border border-slate-600">
+                <h4 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">Docker Container</h4>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Container ID</span>
+                    <span className="text-white font-mono text-xs">{employee.containerId.slice(0, 12)}</span>
+                  </div>
+                  {employee.containerInfo && (
+                    <>
+                      <div className="flex justify-between">
+                        <span className="text-slate-400">Status</span>
+                        <span className={employee.containerInfo.running ? 'text-green-400' : 'text-red-400'}>
+                          {employee.containerInfo.status}
+                        </span>
+                      </div>
+                      {employee.containerInfo.running && (
+                        <>
+                          <div className="flex justify-between">
+                            <span className="text-slate-400">CPU</span>
+                            <span className="text-white">{employee.containerInfo.cpuPercent}%</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-400">Memory</span>
+                            <span className="text-white">{employee.containerInfo.memoryMb} MB</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-slate-400">Uptime</span>
+                            <span className="text-white">{Math.floor((employee.containerInfo.uptime || 0) / 60000)}m</span>
+                          </div>
+                        </>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {/* Container Logs */}
+                {employee.containerLogs && employee.containerLogs.length > 0 && (
+                  <div className="mt-4">
+                    <h5 className="text-xs font-medium text-slate-400 mb-2">Recent Logs</h5>
+                    <div className="bg-slate-900 rounded-lg p-3 max-h-48 overflow-y-auto">
+                      {employee.containerLogs.map((log, i) => (
+                        <div key={i} className="text-xs font-mono text-slate-300 py-0.5">{log}</div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-slate-700/30 rounded-lg p-4">
                 <h4 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">Server Info</h4>
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Provider</span>
-                    <span className="text-white">{onboardingData?.serverProvider || 'Hetzner'}</span>
+                    <span className="text-slate-400">Environment</span>
+                    <span className="text-white">{employee.containerId ? 'Docker Container' : (onboardingData?.serverProvider || 'Simulated')}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-slate-400">Region</span>
-                    <span className="text-white">{onboardingData?.serverRegion || 'eu-central-1'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Plan</span>
-                    <span className="text-white">{onboardingData?.serverPlan || 'CX41 (4 vCPU, 16GB RAM)'}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-400">Sandbox</span>
-                    <span className="text-white">Isolated VM (gVisor)</span>
+                    <span className="text-slate-400">Isolation</span>
+                    <span className="text-white">{employee.containerId ? 'Container (non-root, capabilities dropped)' : 'Simulated'}</span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-slate-400">Audit</span>

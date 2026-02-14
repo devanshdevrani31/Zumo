@@ -1,0 +1,14 @@
+{
+  "name": "zumo-openclaw-agent",
+  "version": "1.0.0",
+  "description": "OpenClaw agent runtime — runs inside Docker, managed by Zumo",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "dependencies": {
+    "openai": "^4.70.0",
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@google/generative-ai": "^0.21.0"
+  }
+}
